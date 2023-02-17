@@ -20,6 +20,7 @@ enum io_pgtable_fmt {
 	APPLE_DART,
 	APPLE_DART2,
 	VIRT_IO_PGTABLE,
+	INTEL_IOMMU,
 	IO_PGTABLE_NUM_FMTS,
 };
 
@@ -281,5 +282,6 @@ extern struct io_pgtable_init_fns io_pgtable_amd_iommu_v1_init_fns;
 extern struct io_pgtable_init_fns io_pgtable_amd_iommu_v2_init_fns;
 extern struct io_pgtable_init_fns io_pgtable_apple_dart_init_fns;
 extern struct io_pgtable_init_fns io_pgtable_virt_init_fns;
+extern struct io_pgtable_init_fns io_pgtable_intel_iommu_init_fns;
 
 #endif /* __IO_PGTABLE_H */
