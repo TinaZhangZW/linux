@@ -1767,8 +1767,9 @@ iommu_group_alloc_default_domain(struct iommu_group *group, int req_type)
 	if (!dom)
 		return NULL;
 
-	pr_warn("Failed to allocate default IOMMU domain of type %u for group %s - Falling back to IOMMU_DOMAIN_DMA",
-		iommu_def_domain_type, group->name);
+	if (iommu_def_domain_type != IOMMU_DOMAIN_DMA_FQ)
+		pr_warn("Failed to allocate default IOMMU domain of type %u for group %s - Falling back to IOMMU_DOMAIN_DMA",
+			iommu_def_domain_type, group->name);
 	return dom;
 }
 
