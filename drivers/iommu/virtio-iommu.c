@@ -991,12 +991,25 @@ static int viommu_attach_pgtable(struct viommu_domain *vdomain,
 	};
 
 	/* TODO: bypass flag? */
+	if (vdomain->bypass == true)
+		return 0;
 
 	switch (fmt) {
 	case VIRT_IO_PGTABLE:
 		req.format = cpu_to_le16(VIRTIO_IOMMU_FORMAT_PGTF_VIRT);
 		req.pgd = cpu_to_le64((u64)cfg->virt.pgd);
 		break;
+	case INTEL_IOMMU: {
+		struct virtio_iommu_req_attach_pgt_vtd *vtd_req =
+			(struct virtio_iommu_req_attach_pgt_vtd *)&req;
+
+		vtd_req->format = cpu_to_le16(VIRTIO_IOMMU_FORMAT_PGTF_VTD);
+		vtd_req->pgd = cpu_to_le64((u64)cfg->virt.pgd);
+		vtd_req->addr_width = cpu_to_le32(cfg->oas);
+		vtd_req->pasid = IOMMU_NO_PASID;
+		break;
+	}
+
 	default:
 		return -EINVAL;
 	};
@@ -1034,6 +1047,16 @@ static int viommu_setup_pgtable(struct viommu_domain *vdomain,
 	case VIRTIO_IOMMU_FORMAT_PGTF_VIRT:
 		fmt = VIRT_IO_PGTABLE;
 		break;
+	case VIRTIO_IOMMU_FORMAT_PGTF_VTD:
+	{
+		struct virtio_iommu_probe_pgt_vtd *vtd_desc =
+			(struct virtio_iommu_probe_pgt_vtd *)desc;
+
+		cfg.vtd_cfg.cap_reg = le64_to_cpu(vtd_desc->cap_reg);
+		cfg.vtd_cfg.ecap_reg = le64_to_cpu(vtd_desc->ecap_reg);
+		fmt = INTEL_IOMMU;
+		break;
+	}
 	default:
 		dev_warn(vdev->dev, "unsupported page table format 0x%x\n",
 			 le16_to_cpu(desc->format));
