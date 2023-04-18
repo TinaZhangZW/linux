@@ -148,6 +148,11 @@ struct io_pgtable_cfg {
 		} apple_dart_cfg;
 
 		struct {
+			u64 cap_reg;
+			u64 ecap_reg;
+		} vtd_cfg;
+
+		struct {
 			dma_addr_t	pgd;
 		} virt;
 	};
