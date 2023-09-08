@@ -135,31 +135,40 @@ void intel_svm_check(struct intel_iommu *iommu)
 	iommu->flags |= VTD_FLAG_SVM_CAPABLE;
 }
 
-static void __flush_svm_range_dev(struct dmar_domain *domain,
-				  struct dev_pasid_info *dev_pasid,
+static void __flush_svm_range(struct dmar_domain *domain,
 				  unsigned long address,
 				  unsigned long pages, int ih)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev_pasid->dev);
+	struct device_domain_info *dev_info;
+	struct intel_iommu *iommu = NULL;
+	struct dev_pasid_info *dev_pasid;
 	u32 pasid = mm_get_enqcmd_pasid(domain->domain.mm);
 
 	if (WARN_ON(!pages))
 		return;
 
-	qi_flush_piotlb(info->iommu, FLPT_DEFAULT_DID, pasid, address, pages, ih);
-	if (info->ats_enabled) {
-		qi_flush_dev_iotlb_pasid(info->iommu, dev_pasid->sid, info->pfsid,
-					 pasid, dev_pasid->qdep, address,
-					 order_base_2(pages));
-		quirk_extra_dev_tlb_flush(info, address, order_base_2(pages),
-					  pasid, dev_pasid->qdep);
+	rcu_read_lock();
+	list_for_each_entry_rcu(dev_pasid, &domain->dev_pasids, link_domain) {
+		dev_info = dev_iommu_priv_get(dev_pasid->dev);
+		if (iommu != dev_info->iommu) {
+			iommu = dev_info->iommu;
+			qi_flush_piotlb(iommu, FLPT_DEFAULT_DID,
+					pasid, address, pages, ih);
+		}
+
+		if (dev_info->ats_enabled) {
+			qi_flush_dev_iotlb_pasid(iommu, dev_pasid->sid, dev_info->pfsid,
+						 pasid, dev_pasid->qdep, address,
+						 order_base_2(pages));
+			quirk_extra_dev_tlb_flush(dev_info, address, order_base_2(pages),
+						  pasid, dev_pasid->qdep);
+		}
 	}
+	rcu_read_unlock();
 }
 
-static void intel_flush_svm_range_dev(struct dmar_domain *domain,
-				      struct dev_pasid_info *dev_pasid,
-				      unsigned long address,
-				      unsigned long pages, int ih)
+static void intel_flush_svm_range(struct dmar_domain *domain, unsigned long address,
+				unsigned long pages, int ih)
 {
 	unsigned long shift = ilog2(__roundup_pow_of_two(pages));
 	unsigned long align = (1ULL << (VTD_PAGE_SHIFT + shift));
@@ -167,37 +176,32 @@ static void intel_flush_svm_range_dev(struct dmar_domain *domain,
 	unsigned long end = ALIGN(address + (pages << VTD_PAGE_SHIFT), align);
 
 	while (start < end) {
-		__flush_svm_range_dev(domain, dev_pasid, start, align >> VTD_PAGE_SHIFT, ih);
+		__flush_svm_range(domain, start, align >> VTD_PAGE_SHIFT, ih);
 		start += align;
 	}
 }
 
-static void intel_flush_svm_range(struct dmar_domain *domain, unsigned long address,
-				unsigned long pages, int ih)
-{
-	struct dev_pasid_info *dev_pasid;
-
-	rcu_read_lock();
-	list_for_each_entry_rcu(dev_pasid, &domain->dev_pasids, link_domain)
-		intel_flush_svm_range_dev(domain, dev_pasid, address, pages, ih);
-	rcu_read_unlock();
-}
-
 static void intel_flush_svm_all(struct dmar_domain *domain)
 {
-	struct device_domain_info *info;
-	struct dev_pasid_info *dev_pasid = NULL;
+	struct device_domain_info *dev_info;
+	struct intel_iommu *iommu = NULL;
+	struct dev_pasid_info *dev_pasid;
 	u32 pasid = mm_get_enqcmd_pasid(domain->domain.mm);
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(dev_pasid, &domain->dev_pasids, link_domain) {
-		info = dev_iommu_priv_get(dev_pasid->dev);
-		qi_flush_piotlb(info->iommu, FLPT_DEFAULT_DID, pasid, 0, -1UL, 0);
-		if (info->ats_enabled) {
-			qi_flush_dev_iotlb_pasid(info->iommu, dev_pasid->sid, info->pfsid,
+		dev_info = dev_iommu_priv_get(dev_pasid->dev);
+		if (iommu != dev_info->iommu) {
+			iommu = dev_info->iommu;
+			qi_flush_piotlb(iommu, FLPT_DEFAULT_DID,
+					pasid, 0, -1UL, 0);
+		}
+
+		if (dev_info->ats_enabled) {
+			qi_flush_dev_iotlb_pasid(dev_info->iommu, dev_pasid->sid, dev_info->pfsid,
 						 pasid, dev_pasid->qdep,
 						 0, 64 - VTD_PAGE_SHIFT);
-			quirk_extra_dev_tlb_flush(info, 0, 64 - VTD_PAGE_SHIFT,
+			quirk_extra_dev_tlb_flush(dev_info, 0, 64 - VTD_PAGE_SHIFT,
 						  pasid, dev_pasid->qdep);
 		}
 	}
