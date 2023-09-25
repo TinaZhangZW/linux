@@ -761,6 +761,8 @@ struct dev_pasid_info {
 #ifdef CONFIG_INTEL_IOMMU_DEBUGFS
 	struct dentry *debugfs_dentry; /* pointer to pasid directory dentry */
 #endif
+	struct rcu_head rcu;
+	u16 did, sid, qdep;
 };
 
 static inline void __iommu_flush_cache(
@@ -1084,15 +1086,6 @@ int intel_svm_page_response(struct device *dev, struct iopf_fault *evt,
 struct iommu_domain *intel_svm_domain_alloc(void);
 void intel_svm_remove_dev_pasid(struct device *dev, ioasid_t pasid);
 void intel_drain_pasid_prq(struct device *dev, u32 pasid);
-
-struct intel_svm_dev {
-	struct list_head list;
-	struct rcu_head rcu;
-	struct device *dev;
-	struct intel_iommu *iommu;
-	u16 did;
-	u16 sid, qdep;
-};
 
 struct intel_svm {
 	struct mmu_notifier notifier;
