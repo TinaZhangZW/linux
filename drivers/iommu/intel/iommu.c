@@ -4553,7 +4553,7 @@ static void intel_iommu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
 	spin_lock_irqsave(&dmar_domain->lock, flags);
 	list_for_each_entry(curr, &dmar_domain->dev_pasids, link_domain) {
 		if (curr->dev == dev && curr->pasid == pasid) {
-			list_del(&curr->link_domain);
+			list_del_rcu(&curr->link_domain);
 			dev_pasid = curr;
 			break;
 		}
@@ -4563,7 +4563,7 @@ static void intel_iommu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
 
 	domain_detach_iommu(dmar_domain, iommu);
 	intel_iommu_debugfs_remove_dev_pasid(dev_pasid);
-	kfree(dev_pasid);
+	kfree_rcu(dev_pasid, rcu);
 out_tear_down:
 	intel_pasid_tear_down_entry(iommu, dev, pasid, false);
 	intel_drain_pasid_prq(dev, pasid);
@@ -4613,8 +4613,14 @@ static int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 
 	dev_pasid->dev = dev;
 	dev_pasid->pasid = pasid;
+
+	/*
+	 * Spin lock protects dev_pasids list from being updated concurrently with
+	 * multiple updaters, while rcu ensures concurrency between one updater
+	 * and multiple readers
+	 */
 	spin_lock_irqsave(&dmar_domain->lock, flags);
-	list_add(&dev_pasid->link_domain, &dmar_domain->dev_pasids);
+	list_add_rcu(&dev_pasid->link_domain, &dmar_domain->dev_pasids);
 	spin_unlock_irqrestore(&dmar_domain->lock, flags);
 
 	if (domain->type & __IOMMU_DOMAIN_PAGING)
