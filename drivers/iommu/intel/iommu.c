@@ -1644,6 +1644,21 @@ int domain_attach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu)
 	unsigned long ndomains;
 	int num, ret = -ENOSPC;
 
+	/*
+	 * SVA domain can get the iommu_domain_info bits from struct dev_pasid_info:
+	 * 1) SVA domain uses FLPT_DEFAULT_DID as the did;
+	 * 2) SVA domain can dereference a pointer of struct intel_iommu using
+	 *    dev_iommu_priv_get(dev_pasid->dev)->iommu.
+	 * 3) Since SVA domain doesn't need to use struct iommu_domain_info, it
+	 *    certainly doesn't need to keep struct iommu_domain_info instance's
+	 *    refcount.
+	 *
+	 * Therefore, hold off allocating struct iommu_domain_info for SVA domain
+	 * until we see it's necessary.
+	 */
+	if (domain_type_is_sva(domain))
+		return 0;
+
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
@@ -1690,6 +1705,10 @@ err_unlock:
 void domain_detach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu)
 {
 	struct iommu_domain_info *info;
+
+	/* See the comment in domain_attach_iommu() */
+	if (domain_type_is_sva(domain))
+		return;
 
 	spin_lock(&iommu->lock);
 	info = xa_load(&domain->iommu_array, iommu->seq_id);
@@ -4590,7 +4609,7 @@ out_tear_down:
 	intel_drain_pasid_prq(dev, pasid);
 }
 
-static int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
+int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 				     struct device *dev, ioasid_t pasid)
 {
 	struct device_domain_info *info = dev_iommu_priv_get(dev);
@@ -4623,6 +4642,10 @@ static int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 
 	if (domain_type_is_si(dmar_domain))
 		ret = intel_pasid_setup_pass_through(iommu, dev, pasid);
+	else if (domain_type_is_sva(dmar_domain))
+		ret = intel_pasid_setup_first_level(iommu, dev,
+			domain->mm->pgd, pasid, FLPT_DEFAULT_DID,
+			cpu_feature_enabled(X86_FEATURE_LA57) ? PASID_FLAG_FL5LP : 0);
 	else if (dmar_domain->use_first_level)
 		ret = domain_setup_first_level(iommu, dmar_domain,
 					       dev, pasid);
@@ -4634,7 +4657,12 @@ static int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 
 	dev_pasid->dev = dev;
 	dev_pasid->pasid = pasid;
-
+	dev_pasid->sid = PCI_DEVID(info->bus, info->devfn);
+	if (info->ats_enabled) {
+		dev_pasid->qdep = info->ats_qdep;
+		if (dev_pasid->qdep >= QI_DEV_EIOTLB_MAX_INVS)
+			dev_pasid->qdep = 0;
+	}
 	/*
 	 * Spin lock protects dev_pasids list from being updated concurrently with
 	 * multiple updaters, while rcu ensures concurrency between one updater
