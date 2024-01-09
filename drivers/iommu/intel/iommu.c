@@ -1657,24 +1657,36 @@ int domain_attach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu)
 		return 0;
 	}
 
-	ndomains = cap_ndoms(iommu->cap);
-	num = find_first_zero_bit(iommu->domain_ids, ndomains);
-	if (num >= ndomains) {
-		pr_err("%s: No free domain ids\n", iommu->name);
-		goto err_unlock;
-	}
+	if (domain_type_is_sva(domain)) {
+		info->refcnt	= 1;
+		info->did	= FLPT_DEFAULT_DID;
+		info->iommu	= iommu;
+		curr = xa_cmpxchg(&domain->iommu_array, iommu->seq_id,
+				  NULL, info, GFP_ATOMIC);
+		if (curr) {
+			ret = xa_err(curr) ? : -EBUSY;
+			goto err_unlock;
+		}
+	} else {
+		ndomains = cap_ndoms(iommu->cap);
+		num = find_first_zero_bit(iommu->domain_ids, ndomains);
+		if (num >= ndomains) {
+			pr_err("%s: No free domain ids\n", iommu->name);
+			goto err_unlock;
+		}
 
-	set_bit(num, iommu->domain_ids);
-	info->refcnt	= 1;
-	info->did	= num;
-	info->iommu	= iommu;
-	curr = xa_cmpxchg(&domain->iommu_array, iommu->seq_id,
-			  NULL, info, GFP_ATOMIC);
-	if (curr) {
-		ret = xa_err(curr) ? : -EBUSY;
-		goto err_clear;
+		set_bit(num, iommu->domain_ids);
+		info->refcnt	= 1;
+		info->did	= num;
+		info->iommu	= iommu;
+		curr = xa_cmpxchg(&domain->iommu_array, iommu->seq_id,
+				  NULL, info, GFP_ATOMIC);
+		if (curr) {
+			ret = xa_err(curr) ? : -EBUSY;
+			goto err_clear;
+		}
+		domain_update_iommu_cap(domain);
 	}
-	domain_update_iommu_cap(domain);
 
 	spin_unlock(&iommu->lock);
 	return 0;
@@ -4590,7 +4602,7 @@ out_tear_down:
 	intel_drain_pasid_prq(dev, pasid);
 }
 
-static int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
+int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 				     struct device *dev, ioasid_t pasid)
 {
 	struct device_domain_info *info = dev_iommu_priv_get(dev);
@@ -4609,14 +4621,25 @@ static int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 	if (context_copied(iommu, info->bus, info->devfn))
 		return -EBUSY;
 
-	ret = prepare_domain_attach_device(domain, dev);
-	if (ret)
-		return ret;
-
 	dev_pasid = kzalloc(sizeof(*dev_pasid), GFP_KERNEL);
 	if (!dev_pasid)
 		return -ENOMEM;
 
+	dev_pasid->dev = dev;
+	dev_pasid->pasid = pasid;
+	if (domain_type_is_sva(dmar_domain)) {
+		dev_pasid->did = FLPT_DEFAULT_DID;
+		dev_pasid->sid = PCI_DEVID(info->bus, info->devfn);
+		if (info->ats_enabled) {
+			dev_pasid->qdep = info->ats_qdep;
+			if (dev_pasid->qdep >= QI_DEV_EIOTLB_MAX_INVS)
+				dev_pasid->qdep = 0;
+		}
+	} else {
+		ret = prepare_domain_attach_device(domain, dev);
+		if (ret)
+			goto out_free;
+	}
 	ret = domain_attach_iommu(dmar_domain, iommu);
 	if (ret)
 		goto out_free;
@@ -4626,14 +4649,19 @@ static int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 	else if (dmar_domain->use_first_level)
 		ret = domain_setup_first_level(iommu, dmar_domain,
 					       dev, pasid);
+	else if (domain_type_is_sva(dmar_domain))
+		ret = intel_pasid_setup_first_level(iommu, dev,
+			domain->mm->pgd, pasid, dev_pasid->did,
+			cpu_feature_enabled(X86_FEATURE_LA57) ? PASID_FLAG_FL5LP : 0);
 	else
 		ret = intel_pasid_setup_second_level(iommu, dmar_domain,
 						     dev, pasid);
-	if (ret)
-		goto out_detach_iommu;
-
-	dev_pasid->dev = dev;
-	dev_pasid->pasid = pasid;
+	if (ret) {
+		if (domain_type_is_sva(dmar_domain))
+			goto out_free;
+		else
+			goto out_detach_iommu;
+	}
 
 	/*
 	 * Spin lock protects dev_pasids list from being updated concurrently with

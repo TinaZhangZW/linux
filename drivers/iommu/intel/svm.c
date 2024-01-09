@@ -271,46 +271,6 @@ static const struct mmu_notifier_ops intel_mmuops = {
 	.arch_invalidate_secondary_tlbs = intel_arch_invalidate_secondary_tlbs,
 };
 
-static int intel_svm_set_dev_pasid(struct iommu_domain *domain,
-				   struct device *dev, ioasid_t pasid)
-{
-	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	struct mm_struct *mm = domain->mm;
-	struct dev_pasid_info *dev_pasid;
-	unsigned long sflags;
-	int ret = 0;
-
-	dev_pasid = kzalloc(sizeof(*dev_pasid), GFP_KERNEL);
-	if (!dev_pasid) {
-		ret = -ENOMEM;
-		goto out;
-	}
-
-	dev_pasid->dev = dev;
-	dev_pasid->did = FLPT_DEFAULT_DID;
-	dev_pasid->sid = PCI_DEVID(info->bus, info->devfn);
-	if (info->ats_enabled) {
-		dev_pasid->qdep = info->ats_qdep;
-		if (dev_pasid->qdep >= QI_DEV_EIOTLB_MAX_INVS)
-			dev_pasid->qdep = 0;
-	}
-
-	/* Setup the pasid table: */
-	sflags = cpu_feature_enabled(X86_FEATURE_LA57) ? PASID_FLAG_FL5LP : 0;
-	ret = intel_pasid_setup_first_level(iommu, dev, mm->pgd, pasid,
-					    dev_pasid->did, sflags);
-	if (ret) {
-		kfree(dev_pasid);
-		goto out;
-	}
-
-	list_add_rcu(&dev_pasid->link_domain, &dmar_domain->dev_pasids);
-out:
-	return ret;
-}
-
 void intel_svm_remove_dev_pasid(struct device *dev, u32 pasid)
 {
 	struct iommu_domain *domain;
@@ -723,7 +683,7 @@ static void intel_svm_domain_free(struct iommu_domain *domain)
 }
 
 static const struct iommu_domain_ops intel_svm_domain_ops = {
-	.set_dev_pasid		= intel_svm_set_dev_pasid,
+	.set_dev_pasid		= intel_iommu_set_dev_pasid,
 	.free			= intel_svm_domain_free
 };
 
@@ -739,6 +699,7 @@ struct iommu_domain *intel_svm_domain_alloc(struct device *dev,
 
 	domain->domain.ops = &intel_svm_domain_ops;
 	INIT_LIST_HEAD(&domain->dev_pasids);
+	xa_init(&domain->iommu_array);
 
 	domain->notifier.ops = &intel_mmuops;
 	ret = mmu_notifier_register(&domain->notifier, mm);
