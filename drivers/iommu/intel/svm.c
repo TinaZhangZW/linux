@@ -27,23 +27,6 @@
 
 static irqreturn_t prq_event_thread(int irq, void *d);
 
-static struct dev_pasid_info *
-domain_lookup_dev_pasid_info_by_dev(struct dmar_domain *domain, struct device *dev)
-{
-	struct dev_pasid_info *dev_pasid = NULL, *t;
-
-	rcu_read_lock();
-	list_for_each_entry_rcu(t, &domain->dev_pasids, link_domain) {
-		if (t->dev == dev) {
-			dev_pasid = t;
-			break;
-		}
-	}
-	rcu_read_unlock();
-
-	return dev_pasid;
-}
-
 int intel_svm_enable_prq(struct intel_iommu *iommu)
 {
 	struct iopf_queue *iopfq;
@@ -270,23 +253,6 @@ static const struct mmu_notifier_ops intel_mmuops = {
 	.release = intel_mm_release,
 	.arch_invalidate_secondary_tlbs = intel_arch_invalidate_secondary_tlbs,
 };
-
-void intel_svm_remove_dev_pasid(struct device *dev, u32 pasid)
-{
-	struct iommu_domain *domain;
-	struct dev_pasid_info *dev_pasid;
-
-	domain = iommu_get_domain_for_dev_pasid(dev, pasid,
-						IOMMU_DOMAIN_SVA);
-	if (WARN_ON_ONCE(IS_ERR_OR_NULL(domain)))
-		return;
-
-	dev_pasid = domain_lookup_dev_pasid_info_by_dev(to_dmar_domain(domain), dev);
-	if (dev_pasid) {
-		list_del_rcu(&dev_pasid->link_domain);
-		kfree_rcu(dev_pasid, rcu);
-	}
-}
 
 /* Page request queue descriptor */
 struct page_req_dsc {

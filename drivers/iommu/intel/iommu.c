@@ -4569,18 +4569,8 @@ static void intel_iommu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
 	unsigned long flags;
 
 	domain = iommu_get_domain_for_dev_pasid(dev, pasid, 0);
-	if (WARN_ON_ONCE(!domain))
+	if (WARN_ON_ONCE(IS_ERR_OR_NULL(domain)))
 		goto out_tear_down;
-
-	/*
-	 * The SVA implementation needs to handle its own stuffs like the mm
-	 * notification. Before consolidating that code into iommu core, let
-	 * the intel sva code handle it.
-	 */
-	if (domain_type_is_sva(dmar_domain)) {
-		intel_svm_remove_dev_pasid(dev, pasid);
-		goto out_tear_down;
-	}
 
 	dmar_domain = to_dmar_domain(domain);
 	spin_lock_irqsave(&dmar_domain->lock, flags);
@@ -4593,6 +4583,9 @@ static void intel_iommu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
 	}
 	WARN_ON_ONCE(!dev_pasid);
 	spin_unlock_irqrestore(&dmar_domain->lock, flags);
+
+	if (domain_type_is_sva(dmar_domain))
+		goto out_tear_down;
 
 	domain_detach_iommu(dmar_domain, iommu);
 	intel_iommu_debugfs_remove_dev_pasid(dev_pasid);
