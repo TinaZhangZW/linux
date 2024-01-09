@@ -244,6 +244,11 @@ static int domain_type_is_si(struct dmar_domain *domain)
 	return domain->domain.type == IOMMU_DOMAIN_IDENTITY;
 }
 
+static inline bool domain_type_is_sva(struct dmar_domain *domain)
+{
+	return domain->domain.type == IOMMU_DOMAIN_SVA;
+}
+
 static int domain_pfn_supported(struct dmar_domain *domain, unsigned long pfn)
 {
 	int addr_width = agaw_to_width(domain->agaw) - VTD_PAGE_SHIFT;
@@ -4544,7 +4549,7 @@ static void intel_iommu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
 	 * notification. Before consolidating that code into iommu core, let
 	 * the intel sva code handle it.
 	 */
-	if (domain->type == IOMMU_DOMAIN_SVA) {
+	if (domain_type_is_sva(dmar_domain)) {
 		intel_svm_remove_dev_pasid(dev, pasid);
 		goto out_tear_down;
 	}
