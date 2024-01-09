@@ -1088,7 +1088,6 @@ int intel_svm_page_response(struct device *dev, struct iopf_fault *evt,
 			    struct iommu_page_response *msg);
 struct iommu_domain *intel_svm_domain_alloc(struct device *dev,
 					    struct mm_struct *mm);
-void intel_svm_remove_dev_pasid(struct device *dev, ioasid_t pasid);
 void intel_drain_pasid_prq(struct device *dev, u32 pasid);
 #else
 static inline void intel_svm_check(struct intel_iommu *iommu) {}
@@ -1099,9 +1098,6 @@ static inline struct iommu_domain *intel_svm_domain_alloc(struct device *dev,
 	return NULL;
 }
 
-static inline void intel_svm_remove_dev_pasid(struct device *dev, ioasid_t pasid)
-{
-}
 #endif
 
 #ifdef CONFIG_INTEL_IOMMU_DEBUGFS
