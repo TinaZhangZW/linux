@@ -1373,6 +1373,94 @@ static void domain_flush_pasid_iotlb(struct intel_iommu *iommu,
 	spin_unlock_irqrestore(&domain->lock, flags);
 }
 
+static void __chain_iommu_flush_dev_iotlb(struct device_domain_info *info,
+					  u64 addr, unsigned int mask,
+					  struct qi_desc *desc,
+					  int *desc_num)
+{
+	u16 sid, qdep;
+
+	if (!info || !info->ats_enabled)
+		return;
+
+	sid = info->bus << 8 | info->devfn;
+	qdep = info->ats_qdep;
+	qi_chain_flush_dev_iotlb(info->iommu, sid, info->pfsid,
+			   qdep, addr, mask, &desc[*desc_num], desc_num);
+	chain_quirk_extra_dev_tlb_flush(info, addr, mask, IOMMU_NO_PASID,
+					qdep, &desc[*desc_num], desc_num);
+}
+
+static void domain_flush_pasid_iotlb_dev_iotlb(struct intel_iommu *iommu,
+				     struct dmar_domain *domain, u64 addr,
+				     unsigned long npages, bool ih)
+{
+	unsigned int aligned_pages = __roundup_pow_of_two(npages);
+	unsigned int mask = ilog2(aligned_pages);
+	struct qi_desc desc[16];
+	int desc_num = 0;
+	u16 did = domain_id_iommu(domain, iommu);
+	struct dev_pasid_info *dev_pasid;
+	struct device_domain_info *info;
+	unsigned long flags;
+
+	memset(desc, 0, sizeof(desc));
+	spin_lock_irqsave(&domain->lock, flags);
+	list_for_each_entry(dev_pasid, &domain->dev_pasids, link_domain) {
+		qi_chain_flush_piotlb(iommu, did, dev_pasid->pasid, addr, npages, ih,
+				      &desc[desc_num], &desc_num);
+
+		info = dev_iommu_priv_get(dev_pasid->dev);
+		if (!info->ats_enabled)
+			continue;
+
+		qi_chain_flush_dev_iotlb_pasid(info->iommu,
+					 PCI_DEVID(info->bus, info->devfn),
+					 info->pfsid, dev_pasid->pasid,
+					 info->ats_qdep, addr,
+					 mask, &desc[desc_num], &desc_num);
+	}
+
+	if (!list_empty(&domain->devices)) {
+		qi_chain_flush_piotlb(iommu, did, IOMMU_NO_PASID, addr, npages, ih,
+				&desc[desc_num], &desc_num);
+		list_for_each_entry(info, &domain->devices, link)
+			__chain_iommu_flush_dev_iotlb(info, addr, mask, desc, &desc_num);
+	}
+
+	qi_submit_sync(iommu, &desc[0], desc_num, 0);
+	spin_unlock_irqrestore(&domain->lock, flags);
+}
+
+static bool iommu_flush_iotlb_in_batch(struct intel_iommu *iommu,
+				  struct dmar_domain *domain,
+				  unsigned long pfn, unsigned int pages,
+				  int ih, int map)
+{
+	int ret = true;
+
+	/* If no device is using ATS, no need to batch iotlb cmds. */
+	if (!domain->has_iotlb_device) {
+		ret = false;
+		goto out;
+	}
+
+	/*
+	 * Only considering batching flush cmds required by changes of
+	 * pages of first-stage tables from present to non-present.
+	 */
+	if (!domain->use_first_level || map) {
+		ret = false;
+		goto out;
+	}
+
+	domain_flush_pasid_iotlb_dev_iotlb(iommu, domain,
+					   pfn, pages,
+					   ih);
+out:
+	return ret;
+}
+
 static void iommu_flush_iotlb_psi(struct intel_iommu *iommu,
 				  struct dmar_domain *domain,
 				  unsigned long pfn, unsigned int pages,
@@ -1388,6 +1476,9 @@ static void iommu_flush_iotlb_psi(struct intel_iommu *iommu,
 
 	if (ih)
 		ih = 1 << 6;
+
+	if (iommu_flush_iotlb_in_batch(iommu, domain, pfn, pages, ih, map))
+		return;
 
 	if (domain->use_first_level) {
 		domain_flush_pasid_iotlb(iommu, domain, addr, pages, ih);
@@ -1457,6 +1548,9 @@ static void intel_flush_iotlb_all(struct iommu_domain *domain)
 	xa_for_each(&dmar_domain->iommu_array, idx, info) {
 		struct intel_iommu *iommu = info->iommu;
 		u16 did = domain_id_iommu(dmar_domain, iommu);
+
+		if (iommu_flush_iotlb_in_batch(iommu, dmar_domain, 0, -1, 0, 0))
+			continue;
 
 		if (dmar_domain->use_first_level)
 			domain_flush_pasid_iotlb(iommu, dmar_domain, 0, -1, 0);
@@ -4637,6 +4731,10 @@ int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 	if (ret)
 		goto out_free;
 
+	ret = domain_attach_iommu(dmar_domain, iommu);
+	if (ret)
+		goto out_free;
+
 	if (domain_type_is_si(dmar_domain))
 		ret = intel_pasid_setup_pass_through(iommu, dev, pasid);
 	else if (dmar_domain->use_first_level)
@@ -5037,6 +5135,27 @@ void quirk_extra_dev_tlb_flush(struct device_domain_info *info,
 	} else {
 		qi_flush_dev_iotlb_pasid(info->iommu, sid, info->pfsid,
 					 pasid, qdep, address, mask);
+	}
+}
+
+void chain_quirk_extra_dev_tlb_flush(struct device_domain_info *info,
+				     unsigned long address, unsigned long mask,
+				     u32 pasid, u16 qdep, struct qi_desc *desc,
+				     int *desc_num)
+{
+	u16 sid;
+
+	if (likely(!info->dtlb_extra_inval))
+		return;
+
+	sid = PCI_DEVID(info->bus, info->devfn);
+	if (pasid == IOMMU_NO_PASID) {
+		qi_chain_flush_dev_iotlb(info->iommu, sid, info->pfsid,
+					 qdep, address, mask, desc, desc_num);
+	} else {
+		qi_chain_flush_dev_iotlb_pasid(info->iommu, sid, info->pfsid,
+					       pasid, qdep, address, mask,
+					       desc, desc_num);
 	}
 }
 

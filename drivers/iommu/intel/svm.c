@@ -135,6 +135,46 @@ void intel_svm_check(struct intel_iommu *iommu)
 	iommu->flags |= VTD_FLAG_SVM_CAPABLE;
 }
 
+static bool svm_flush_iotlb_in_batch(struct iommu_domain *domain,
+				     unsigned long address,
+				     unsigned long pages,
+				     int ih)
+{
+	u32 pasid = mm_get_enqcmd_pasid(domain->mm);
+	struct device_domain_info *dev_info;
+	struct dev_pasid_info *dev_pasid;
+	struct iommu_domain_info *iommu_info;
+	int desc_num = 0;
+	struct qi_desc desc[16];
+	unsigned long i;
+	int ret = true;
+
+	xa_for_each(&to_dmar_domain(domain)->iommu_array, i, iommu_info) {
+		desc_num = 0;
+		memset(desc, 0 , sizeof(desc));
+		qi_chain_flush_piotlb(iommu_info->iommu, FLPT_DEFAULT_DID,
+		      pasid, address, pages, ih, &desc[desc_num],
+		      &desc_num);
+
+		list_for_each_entry_rcu(dev_pasid, &to_dmar_domain(domain)->dev_pasids, link_domain) {
+			dev_info = dev_iommu_priv_get(dev_pasid->dev);
+			if (iommu_info->iommu != dev_info->iommu)
+				continue;
+
+			if (dev_info->ats_enabled) {
+				qi_chain_flush_dev_iotlb_pasid(dev_info->iommu, dev_pasid->sid, dev_info->pfsid,
+							       pasid, dev_pasid->qdep, address,
+							       order_base_2(pages), &desc[desc_num], &desc_num);
+				chain_quirk_extra_dev_tlb_flush(dev_info, address, order_base_2(pages),
+								pasid, dev_pasid->qdep, &desc[desc_num], &desc_num);
+			}
+		}
+		qi_submit_sync(dev_info->iommu, desc, desc_num, 0);
+	}
+
+	return ret;
+}
+
 static void __flush_svm_range(struct iommu_domain *domain,
 				  unsigned long address,
 				  unsigned long pages, int ih)
@@ -149,6 +189,9 @@ static void __flush_svm_range(struct iommu_domain *domain,
 		return;
 
 	rcu_read_lock();
+	if (svm_flush_iotlb_in_batch(domain, address, pages, ih))
+		goto out;
+
 	xa_for_each(&to_dmar_domain(domain)->iommu_array, idx, iommu_info) {
 		qi_flush_piotlb(iommu_info->iommu, FLPT_DEFAULT_DID,
 				pasid, address, pages, ih);
@@ -167,6 +210,7 @@ static void __flush_svm_range(struct iommu_domain *domain,
 			}
 		}
 	}
+out:
 	rcu_read_unlock();
 }
 
