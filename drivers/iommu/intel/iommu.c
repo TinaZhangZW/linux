@@ -4605,7 +4605,7 @@ int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 	struct device_domain_info *info = dev_iommu_priv_get(dev);
 	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
 	struct intel_iommu *iommu = info->iommu;
-	struct dev_pasid_info *dev_pasid;
+	struct dev_pasid_info *dev_pasid, *curr;
 	unsigned long flags;
 	int ret;
 
@@ -4645,6 +4645,7 @@ int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 	if (ret)
 		goto out_detach_iommu;
 
+	INIT_LIST_HEAD(&dev_pasid->link_domain);
 	dev_pasid->dev = dev;
 	dev_pasid->pasid = pasid;
 	dev_pasid->sid = PCI_DEVID(info->bus, info->devfn);
@@ -4659,7 +4660,15 @@ int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 	 * and multiple readers
 	 */
 	spin_lock_irqsave(&dmar_domain->lock, flags);
-	list_add_rcu(&dev_pasid->link_domain, &dmar_domain->dev_pasids);
+	list_for_each_entry(curr, &dmar_domain->dev_pasids, link_domain) {
+		info = dev_iommu_priv_get(curr->dev);
+		if (info->iommu == iommu) {
+			list_add_rcu(&dev_pasid->link_domain, &curr->link_domain);
+			break;
+		}
+	}
+	if (list_empty(&dev_pasid->link_domain))
+		list_add_rcu(&dev_pasid->link_domain, &dmar_domain->dev_pasids);
 	spin_unlock_irqrestore(&dmar_domain->lock, flags);
 
 	if (domain->type & __IOMMU_DOMAIN_PAGING)
