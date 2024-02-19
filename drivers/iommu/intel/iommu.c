@@ -1348,7 +1348,7 @@ static void iommu_flush_dev_iotlb(struct dmar_domain *domain,
 			continue;
 
 		qi_flush_dev_iotlb_pasid(info->iommu,
-					 PCI_DEVID(info->bus, info->devfn),
+					 dev_pasid->sid,
 					 info->pfsid, dev_pasid->pasid,
 					 info->ats_qdep, addr,
 					 mask);
